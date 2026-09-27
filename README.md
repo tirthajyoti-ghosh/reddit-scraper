@@ -24,6 +24,7 @@ This client clears both:
 | Verified session | warm up on the homepage (the JSON endpoints hard-`403` an un-warmed client) |
 | JS challenge | regex fast-path (`solution = seed + seed`), with a Node fallback (`solve.js`) that runs Reddit's *actual* challenge JS in a sandbox with a minimal DOM shim |
 | Politeness | jittered delays, `429` Retry-After, exponential backoff, re-warm on `403` |
+| Human verification (reCAPTCHA) | detected and stopped at, never solved ([see below](#when-reddit-asks-for-a-human)) |
 | Listings | pagination via the `after` / `count` cursor |
 | Comment trees | recursive flatten with depth, plus expansion of both `more` stub kinds — `morechildren` (breadth) and focused refetch (depth) |
 
@@ -56,6 +57,67 @@ for c in walk(roots):
 ```
 
 See [`examples/`](examples/).
+
+## Command line (for people and AI agents)
+
+`cli.py` wraps the scraper with the politeness a shared machine needs, so several
+scripts or agents can use it at once without hammering Reddit.
+
+```bash
+python3 cli.py search "moondrop chu" --sub iems,headphones --t year --limit 10
+python3 cli.py thread https://www.reddit.com/r/iems/comments/abc123/some_title/ --top 40
+python3 cli.py listing iems --sort top --limit 25
+```
+
+Add `--json` to any command for machine-readable output. `thread` takes `www.` and
+`old.reddit.com` links or a bare permalink.
+
+| Built in | Why |
+| --- | --- |
+| One Reddit conversation at a time across all processes (a file lock) | parallel agents queue instead of bursting |
+| JSON responses cached on disk for 24 h (`--max-age`, `--no-cache`) | asking again costs no request |
+| Session cookies reused for 30 min | each run skips the homepage warmup |
+
+Cache, cookies and the lock live in `~/.cache/reddit-scraper` (override with
+`$REDDIT_SCRAPER_CACHE` or `--cache-dir`). The lock uses `fcntl`, so on Windows runs
+are not serialised.
+
+| Exit code | Meaning | What to do |
+| --- | --- | --- |
+| 0 | ok | |
+| 1 | other failure (network, non-JSON answer) | read stderr |
+| 2 | bad arguments | see `--help` |
+| 3 | Reddit wants a human (reCAPTCHA page) | stop; wait, or use the official API |
+| 4 | Reddit's JS challenge changed | stop; the solver needs updating |
+
+**If you are an AI agent:** use `--json`, keep volume low (a handful of searches and
+threads per task), and let the cache work for you. On exit code 3 or 4, stop and tell
+your human. Don't retry in a loop, and never try to solve or get around a CAPTCHA: it
+is a wall for humans, and retrying only makes the block last longer.
+
+## When Reddit asks for a human
+
+On 27 Sep 2026 Reddit started answering this client with a Google reCAPTCHA page
+("Prove your humanity") instead of the JS challenge. That is a different kind of gate:
+it is meant for a person, and this client does not solve CAPTCHAs.
+
+- `RedditScraper` raises `HumanVerificationRequired` the moment it sees one, instead of
+  mistaking the page for content or re-warming in a loop. The CLI exits with `3`.
+- A JS challenge in a shape the solver doesn't recognise raises `ChallengeFormatChanged`
+  (CLI exit `4`) instead of a bare "no token" error.
+- Both subclass `RuntimeError`, so existing `except RuntimeError` code keeps working.
+
+If you hit either, wait before trying again, or move to the official OAuth API
+([`praw`](https://praw.readthedocs.io/)), which is the right tool for anything real anyway.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -t .
+```
+
+They run offline: only the session's network call is swapped for a fake, so nothing
+touches reddit.com.
 
 ## Notes & caveats
 

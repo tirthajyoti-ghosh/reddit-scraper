@@ -18,6 +18,18 @@ HERE        = os.path.dirname(os.path.abspath(__file__))
 NODE_SOLVER = os.path.join(HERE, "solve.js")
 BASE        = "https://www.reddit.com"
 
+
+class HumanVerificationRequired(RuntimeError):
+    """Reddit answered with a human-verification page (reCAPTCHA) instead of content."""
+
+
+class ChallengeFormatChanged(RuntimeError):
+    """Reddit served a JS challenge this solver no longer understands."""
+
+
+# Markers of the reCAPTCHA "Prove your humanity" page (seen from 27 Sep 2026).
+HUMAN_CHECK_MARKERS = ("google.com/recaptcha", 'action="/?captcha=1"')
+
 class RedditScraper:
     def __init__(self, impersonate="chrome", min_delay=2.0, max_delay=5.0, verbose=True):
         self.s = requests.Session(impersonate=impersonate)   # browser TLS + HTTP2 fingerprint
@@ -45,18 +57,31 @@ class RedditScraper:
     def _solve(self, html):
         token = re.search(r'name="token"\s+value="([0-9a-f]+)"', html)
         if not token:
-            raise RuntimeError("challenge present but no token")
+            raise ChallengeFormatChanged(
+                "Reddit served a JS challenge without the hidden token field this solver expects. "
+                "The challenge format has changed; _solve() and solve.js need updating.")
         sol = self._solution(html)
         self._log(f"solving challenge (solution={sol[:16]}...)")
         self.s.get(BASE + "/", params={"solution": sol, "js_challenge": "1",
                                        "token": token.group(1), "jsc_orig_r": ""}, timeout=30)
 
+    def _stop_if_human_check(self, r, url):
+        """A reCAPTCHA page is a wall for humans, not a puzzle for this client: stop, don't retry."""
+        ctype = (r.headers.get("content-type") or "").lower()
+        if "html" in ctype and any(m in r.text for m in HUMAN_CHECK_MARKERS):
+            raise HumanVerificationRequired(
+                f"Reddit answered {url} with a human-verification page (reCAPTCHA). "
+                "This scraper does not solve CAPTCHAs, and retrying only makes the block last longer. "
+                "Wait before trying again, or use Reddit's official API (see README).")
+
     def warmup(self):
         self._log("warming up session on homepage")
         r = self.s.get(BASE + "/", timeout=30)
+        self._stop_if_human_check(r, BASE + "/")
         if "js_challenge" in r.text:
             self._solve(r.text)
             r = self.s.get(BASE + "/", timeout=30)
+            self._stop_if_human_check(r, BASE + "/")
         self._warmed = (r.status_code == 200 and "js_challenge" not in r.text)
         self._log(f"warmup {'OK' if self._warmed else 'FAILED'}  cookies={list(self.s.cookies.keys())}")
 
@@ -68,6 +93,7 @@ class RedditScraper:
         for attempt in range(max_retries):
             self._sleep()
             r = self.s.get(url, params=params, timeout=30)
+            self._stop_if_human_check(r, url)
             if r.status_code == 200 and "js_challenge" not in r.text:
                 return r
             if r.status_code == 429:
